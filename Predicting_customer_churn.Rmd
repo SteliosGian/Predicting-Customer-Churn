@@ -1,0 +1,526 @@
+---
+title: "Predicting Customer Churn"
+author: "Stelios Giannikis"
+---
+
+```{r}
+
+library(tidyverse)
+library(ROSE) ### for the roc curve
+library(caret) ### for the models
+library(RColorBrewer) ### for the heatmap
+library(caTools) ### for splitting in train and pre-test
+library(mice) ### for finding the missing values
+library(DMwR) ### for the knn imputation
+library(CustomerScoringMetrics) ### for TopDecileLift
+library(DescTools) ### for gini
+library(pdp) ### for the partial dependence plots
+library(boot) ### for the bootstrap method
+
+
+```
+
+Load data and detect missing values
+
+```{r}
+train <- read.csv("calibration.csv")
+test <- read.csv("future.csv")
+
+
+
+### check number of missing values in train and test set
+sum(is.na(train))
+sum(is.na(test))
+
+### check which variables have the most missing values
+md.pattern(train)
+md.pattern(test)
+```
+
+
+Train pre-processing
+
+```{r}
+
+
+################################################
+############# train set pre-processing #########
+################################################
+
+### remove X and income column
+train <- train[,-c(1,18)]
+
+### change churn to factor
+train$churn <- factor(train$churn, levels = c(0,1), labels = c("No", "Yes"))
+
+### R = Responded, N = Not Responded
+train$mailresp <- as.factor(ifelse(train$mailresp == "R", "R", "N"))
+
+
+
+
+
+### change area column with west, midwest, northeast, south and no answer
+
+train$area <- as.character(train$area)
+train$area <- ifelse(train$area == "CALIFORNIA NORTH AREA" | train$area == "LOS ANGELES AREA" | train$area == "NORTHWEST/ROCKY MOUNTAIN AREA" | train$area == "SOUTHWEST AREA", "West", train$area)
+
+train$area <- ifelse(train$area == "ATLANTIC SOUTH AREA" | train$area == "CHICAGO AREA" | train$area == "GREAT LAKES AREA" | train$area == "MIDWEST AREA" | train$area == "OHIO AREA", "Midwest", train$area)
+
+train$area <- ifelse(train$area == "NEW ENGLAND AREA" | train$area == "NEW YORK CITY AREA" | train$area == "PHILADELPHIA AREA", "Northeast", train$area)
+
+train$area <- ifelse(train$area == "CENTRAL/SOUTH TEXAS AREA" | train$area == "DALLAS AREA" | train$area == "DC/MARYLAND/VIRGINIA AREA" | train$area == "HOUSTON AREA" | train$area == "NORTH FLORIDA AREA" | train$area == "SOUTH FLORIDA AREA" | train$area == "TENNESSEE AREA", "South", train$area)
+
+train$area <- ifelse(train$area == "", "No Answer", train$area)
+
+
+train$area <- as.factor(train$area)
+
+
+
+
+
+### change " " with "No answer" in prizm_social_one
+levels(train$prizm_social_one)[1] <- "No Answer"
+
+### change " " with "No answer" in marital
+levels(train$marital)[1] <- "No Answer"
+
+
+
+
+### change " " with "No answer" in children
+levels(train$children)[1] <- "No Answer"
+
+### change " " with "No answer" in dwlltype
+levels(train$dwlltype)[1] <- "No Answer"
+
+
+
+
+```
+
+
+
+
+
+Test pre-processing
+
+```{r}
+################################################
+############# test set pre-processing ##########
+################################################
+
+### remove X and income column
+test <- test[,-c(1,18)]
+
+
+### change churn to factor
+test$churn <- factor(test$churn, levels = c(0,1), labels = c("No", "Yes"))
+
+### R = Responded, N = Not Responded
+test$mailresp <- as.factor(ifelse(test$mailresp == "R", "R", "N"))
+
+
+
+
+
+### change area column with west, midwest, northeast, south and no answer
+test$area <- as.character(test$area)
+test$area <- ifelse(test$area == "CALIFORNIA NORTH AREA" | test$area == "LOS ANGELES AREA" | test$area == "NORTHWEST/ROCKY MOUNTAIN AREA" | test$area == "SOUTHWEST AREA", "West", test$area)
+
+test$area <- ifelse(test$area == "ATLANTIC SOUTH AREA" | test$area == "CHICAGO AREA" | test$area == "GREAT LAKES AREA" | test$area == "MIDWEST AREA" | test$area == "OHIO AREA", "Midwest", test$area)
+
+test$area <- ifelse(test$area == "NEW ENGLAND AREA" | test$area == "NEW YORK CITY AREA" | test$area == "PHILADELPHIA AREA", "Northeast", test$area)
+
+test$area <- ifelse(test$area == "CENTRAL/SOUTH TEXAS AREA" | test$area == "DALLAS AREA" | test$area == "DC/MARYLAND/VIRGINIA AREA" | test$area == "HOUSTON AREA" | test$area == "NORTH FLORIDA AREA" | test$area == "SOUTH FLORIDA AREA" | test$area == "TENNESSEE AREA", "South", test$area)
+
+test$area <- ifelse(test$area == "", "No Answer", test$area)
+
+
+test$area <- as.factor(test$area)
+
+### create "No Answer" level
+levels(test$area)[5] <- "No Answer"
+
+
+
+
+### change " " with "No answer" in prizm_social_one
+levels(test$prizm_social_one)[1] <- "No Answer"
+
+### change " " with "No answer" in marital
+levels(test$marital)[1] <- "No Answer"
+
+
+
+
+
+### change " " with "No answer" in children
+levels(test$children)[1] <- "No Answer"
+
+### change " " with "No answer" in dwlltype
+levels(test$dwlltype)[1] <- "No Answer"
+
+
+
+
+
+
+```
+
+Exploratory Data Analysis for train set
+
+```{r}
+
+### heatmap of correlations
+heatmap(cor(train[,-c(1,14,17,18,19,20,21,22,24)]), Rowv = NA, Colv = NA, margins = c(10,1.5), col = brewer.pal(9, "Blues"), symm = TRUE)
+
+### boxplots of variables
+for (i in 1:ncol(train)){
+  if (class(train[,i]) != "factor"){
+    boxplot(train[,i], main = names(train)[i])
+  }
+}
+
+### remove only extreme outlier values
+
+### adjrev outlier value = 27071.3
+max(boxplot(train$adjrev)$out)
+subset(train, adjrev == max(boxplot(train$adjrev)$out))
+
+### change_mou outlier value = 31219.25
+max(boxplot(train$change_mou)$out)
+subset(train, change_mou == max(boxplot(train$change_mou)$out))
+
+### peak_vce_Mean outlier value = 1921.333
+max(boxplot(train$peak_vce_Mean)$out)
+subset(train, peak_vce_Mean == max(boxplot(train$peak_vce_Mean)$out))
+
+### mou_Mean outlier value = 12206.75
+max(boxplot(train$mou_Mean)$out)
+subset(train, mou_Mean == max(boxplot(train$mou_Mean)$out))
+
+### mouowylisv_Mean outlier value = 1802.707
+max(boxplot(train$mouowylisv_Mean)$out)
+subset(train, mouowylisv_Mean == max(boxplot(train$mouowylisv_Mean)$out))
+
+###cc_mou_Mean outlier value = 533.7267
+max(boxplot(train$cc_mou_Mean)$out)
+subset(train, cc_mou_Mean == max(boxplot(train$cc_mou_Mean)$out))
+
+train <- train[-c(10521, 16310, 42488, 16310, 21685, 42267),]
+
+### remove negative values from eqpdays
+train <- subset(train, eqpdays > 0 )
+
+### remove negative values of base cost of the calling plan
+train <- subset(train, totmrc_Mean > 0)
+test <- subset(test, totmrc_Mean > 0)
+```
+
+Impute missing values
+
+```{r}
+### impute the NA values in the train set using knn with k = 2
+train <- knnImputation(train, k = 2)
+
+### impute the NA values in the test set using knn in the training set
+### with k = 2
+test <- knnImputation(test, k = 2, distData = train)
+```
+
+
+Base Random Forest model
+
+```{r}
+### split ratio = 0.5
+### split training set in two for the training
+### of level-0 and level-1 learners
+
+set.seed(1)
+split_small <- sample.split(train$churn, SplitRatio = 0.5)
+small_train <- subset(train, split_small == TRUE)
+small_pretest <- subset(train, split_small == FALSE)
+
+
+
+### random forest model
+fitControl <- trainControl(method = "cv",
+                           number = 10,
+                           search = "grid")
+### best mtry = 5
+grid <- expand.grid(mtry = 5)
+
+##################################
+####### random forest model ######
+##################################
+set.seed(1)
+
+### cv accuracy = 61.81%
+ran_for <- train(churn ~ ., data = train,
+                  method = "rf",
+                  trControl = fitControl,
+                  tuneGrid = grid)
+
+
+ran_for_prob <- predict(ran_for, newdata = test, type = "prob")
+ran_for_pred <- ifelse(ran_for_prob[,2] > 0.5, "Yes", "No")
+
+### TP = 60.62%
+### FP = 36.74%
+table(ran_for_pred, test$churn)
+
+### precision = 0.029
+### recall = 0.611
+accuracy.meas(test$churn, ran_for_prob[,2])
+
+### test error rate = 36.79%
+round(mean(test$churn != ran_for_pred)*100, digits = 2)
+
+### auc = 0.669
+roc.curve(test$churn, ran_for_prob[,2])
+
+
+### TopDecileLift = 2.311
+topDecileLift(ran_for_prob[,2], test$churn)
+
+### lift chart
+liftChart(ran_for_prob[,2], test$churn)
+
+### gini = 0.147
+Gini(ran_for_prob[,2])
+
+### variable importance
+ran_for_imp <- varImp(ran_for)
+plot(ran_for_imp, top = 12, main = "Variable Importance")
+
+### pdp for eqpdays
+partial(ran_for, pred.var = c("eqpdays"), plot = TRUE, rug = TRUE, type = "classification", prob = TRUE, plot.engine = "ggplot2", which.class = 2)
+### pdp for change_mou
+partial(ran_for, pred.var = c("change_mou"), plot = TRUE, rug = TRUE, type = "classification", prob = TRUE, plot.engine = "ggplot2", which.class = 2)
+### pdp for adjrev
+partial(ran_for, pred.var = c("adjrev"), plot = TRUE, rug = TRUE, type = "classification", prob = TRUE, plot.engine = "ggplot2", which.class = 2)
+### ice for eqpdays
+partial(ran_for, pred.var = c("eqpdays"), plot = TRUE, rug = TRUE, type = "classification", prob = TRUE, plot.engine = "ggplot2", which.class = 2, ice = TRUE, alpha = 0.1)
+### ice for change_mou
+partial(ran_for, pred.var = c("change_mou"), plot = TRUE, rug = TRUE, type = "classification", prob = TRUE, plot.engine = "ggplot2", which.class = 2, ice = TRUE, alpha = 0.1)
+### ice for adjrev
+partial(ran_for, pred.var = c("adjrev"), plot = TRUE, rug = TRUE, type = "classification", prob = TRUE, plot.engine = "ggplot2", which.class = 2, ice = TRUE, alpha = 0.1)
+
+
+
+```
+
+Random forest model for stacking
+
+```{r}
+stack_dat <- data.frame(row.names = 1:25425)
+stack_test <- data.frame(row.names = 1:99915)
+
+fitControl <- trainControl(method = "cv",
+                           number = 10,
+                           search = "grid")
+### best mtry = 5
+grid <- expand.grid(mtry = 5)
+
+##################################
+####### random forest model ######
+##################################
+
+
+
+### accuracy = 61.45%
+
+set.seed(7)
+model_rf <- train(churn ~ ., data = small_train,
+                  method = "rf",
+                  trControl = fitControl,
+                  tuneGrid = grid)
+
+
+
+rf_prob <- predict(model_rf, newdata = small_pretest, type = "prob")
+stack_dat$rf_prob <- rf_prob[,2]
+stack_test$rf_prob <- predict(model_rf, newdata = test, type = "prob")[,2]
+
+varImp(model_rf)
+```
+
+CART model for stacking
+
+```{r}
+##########################
+#### CART model ##########
+##########################
+ctrl_cart <- trainControl(method = "cv", number = 10, search = "grid")
+set.seed(5)
+### cp = 0
+grid_cart <- expand.grid(cp = 0)
+### accuracy = 55.60%
+model_cart <- train(churn ~ ., data = small_train, method = "rpart", trControl = ctrl_cart, tuneGrid = grid_cart)
+
+cart_prob <- predict(model_cart, newdata = small_pretest, type = "prob")
+
+### stacking
+stack_dat$cart_prob <- cart_prob[,2]
+stack_test$cart_prob <- predict(model_cart, newdata = test, type = "prob")[,2]
+
+varImp(model_cart)
+```
+
+Neural network for stacking (with nnet)
+
+```{r}
+##########################
+##### neural network #####
+##########################
+control_nn <- trainControl(method = "cv", number = 10, search = "grid")
+### best size = 14, decay = 8.6
+grid_nn <- expand.grid(size = 14, decay = 8.6)
+
+### cv accuracy = 58.96%
+
+set.seed(6)
+model_nn <- train(churn ~ ., data = small_train, method = "nnet", trControl = control_nn, preProc = c("center","scale"), tuneGrid = grid_nn)
+
+
+
+nn_prob <- predict(model_nn, newdata = small_pretest, type = "prob")
+
+stack_dat$nn_prob <- nn_prob[,2]
+stack_test$nn_prob <- predict(model_nn, newdata = test, type = "prob")[,2]
+
+varImp(model_nn, useModel = FALSE)
+```
+
+Knn model for stacking
+
+```{r}
+
+#### knn with k = 86
+control_knn86 <- trainControl(method = "cv", number = 10, search = "grid")
+grid_knn86 <- expand.grid(k = 86)
+set.seed(10)
+### accuracy = 55.51%
+model_knn86 <- train(churn ~ ., data = small_train, method = "knn", trControl = control_knn86, preProc = c("scale"), tuneGrid = grid_knn86)
+
+knn86_prob <- predict(model_knn86, newdata = small_pretest, type = "prob")
+
+stack_dat$knn86_prob <- knn86_prob[,2]
+stack_test$knn86_prob <- predict(model_knn86, newdata = test, type = "prob")[,2]
+
+varImp(model_knn86, useModel = FALSE)
+
+### knn with k = 1
+grid_knn1 <- expand.grid(k = 1)
+set.seed(12)
+### accuracy = 52.16%
+model_knn1 <- train(churn ~ ., data = small_train, method = "knn", trControl = control_knn86, preProc = c("scale"), tuneGrid = grid_knn1)
+
+knn1_prob <- predict(model_knn1, newdata = small_pretest, type = "prob")
+
+stack_dat$knn1_prob <- knn1_prob[,2]
+stack_test$knn1_prob <- predict(model_knn1, newdata = test, type = "prob")[,2]
+
+varImp(model_knn1, useModel = FALSE)
+```
+
+Bagging model for stacking
+
+```{r}
+### bagging
+grid_bag <- expand.grid(mtry = 24)
+set.seed(13)
+### accuracy = 61.40%
+model_bag <- train(churn ~ ., data = small_train, method = "rf", trControl = control_knn86, tuneGrid = grid_bag)
+
+bag_prob <- predict(model_bag, newdata = small_pretest, type = "prob")
+
+stack_dat$bag_prob <- bag_prob[,2]
+stack_test$bag_prob <- predict(model_bag, newdata = test, type = "prob")[,2]
+
+varImp(model_bag)
+```
+
+
+Correlation of predictions
+
+```{r}
+correl <- data.frame(random_forest = rf_prob[,2], cart = cart_prob[,2], nn = nn_prob[,2], knn86 = knn86_prob[,2], knn1 = knn1_prob[,2], bag = bag_prob[,2])
+
+cor(correl)
+```
+
+
+
+
+
+Stacking with keras neural network
+
+```{r}
+### insert y column to data
+stack_dat$y <- small_pretest$churn
+stack_test$y <- test$churn
+
+stack_control_nn <- trainControl(method = "cv", number = 10, search = "grid", classProbs = TRUE, summaryFunction = twoClassSummary)
+### best tuning parameters
+### size = 9, lambda = 0, batch_size = 30, lr = 0.2, rho = 0.38, decay = 0.03, activation = tanh
+stack_grid_nn <- expand.grid(size = 9,
+                             lambda = 0,
+                             batch_size = 30,
+                             lr = 0.2,
+                             rho = 0.38,
+                             decay = 0.03,
+                             activation = "tanh")
+
+set.seed(1)
+### auc = 0.6602
+
+nn_stack <- train(y ~ ., data = stack_dat, method = "mlpKerasDecay", trControl = stack_control_nn, tuneGrid = stack_grid_nn, metric = "ROC")
+
+nn_stack_prob <- predict(nn_stack, newdata = stack_test, type = "prob")
+nn_stack_pred <- ifelse(nn_stack_prob[,2] > 0.5, "Yes", "No")
+
+### TP = 58.42%
+### FP = 35.74%
+table(nn_stack_pred, stack_test$y)
+### test error rate = 35.84%
+mean(nn_stack_pred != stack_test$y)*100
+### auc = 0.664
+roc.curve(stack_test$y, nn_stack_prob[,2])
+
+### topdecilelift = 2.441
+topDecileLift(nn_stack_prob[,2], test$churn)
+
+### gini = 0.176
+Gini(nn_stack_prob[,2])
+
+### lift chart
+liftChart(nn_stack_prob[,2], test$churn)
+
+
+### boot function
+boot_fun_nn <- function(data, ind){
+  model_boot_nn <- train(y ~ ., data = data[ind,], method = "mlpKerasDecay", trControl = stack_control_nn, tuneGrid = stack_grid_nn, metric = "ROC", verbose = 0)
+  prob_boot_nn <- predict(model_boot_nn, newdata = stack_test, type = "prob")
+  return(topDecileLift(prob_boot_nn[,2], test$churn))
+}
+
+### boot std. error = 0.026
+### takes too long to compute (almost 12 hours)!
+boots_nn <- boot(stack_dat, statistic = boot_fun_nn, R = 300)
+
+
+### plot of 95% confidence interval of bootstrap samples
+par(mar = c(5, 4, 4, 1) + 0.1)
+hist(boots_nn$t, xlab = "TopDecileLift", las = 1, col = "blue", main = "Bootstrap of Confidence Interval", breaks = 15, border = "white")
+conf_int_nn <- quantile(boots_nn$t, c(0.025, 1-0.025) )
+abline(v = conf_int_nn, col = "green", lwd = 2)
+abline(v = topDecileLift(nn_stack_prob[,2], test$churn), col = "red", lwd = 2)
+
+### 95% confidence interval (2.393, 2.492)
+boot.ci(boots_nn, type = "perc")
+
+```
+

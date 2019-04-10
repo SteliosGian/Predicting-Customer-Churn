@@ -1,4 +1,4 @@
-# Predicting_churn
+# Predicting Customer Churn
 
 This project is for predicting the customer churn of a telecommunication company.
 The main method used is **Stacked Generalization**. <br>
